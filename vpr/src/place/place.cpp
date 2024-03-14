@@ -106,7 +106,7 @@ using std::min;
 /* For comp_cost.  NORMAL means use the method that generates updateable  *
  * bounding boxes for speed.  CHECK means compute all bounding boxes from *
  * scratch using a very simple routine to allow checks of the other       *
- * costs.                                   
+ * costs.
  */
 
 enum e_cost_methods {
@@ -546,6 +546,49 @@ static void print_placement_swaps_stats(const t_annealing_state& state);
 static void print_placement_move_types_stats(
     const MoveTypeStat& move_type_stat);
 
+/********************************************************************
+ * Give a given pin index, find the side where this pin is located
+ * on the physical tile
+ * Note:
+ *   - Need to check if the pin_width_offset and pin_height_offset
+ *     are properly set in VPR!!!
+ *******************************************************************/
+static std::vector<e_side> find_physical_tile_pin_side(t_physical_tile_type_ptr physical_tile,
+                                                       const int& physical_pin) {
+    std::vector<e_side> pin_sides;
+    for (const e_side& side_cand : {TOP, RIGHT, BOTTOM, LEFT}) {
+        int pin_width_offset = physical_tile->pin_width_offset[physical_pin];
+        int pin_height_offset = physical_tile->pin_height_offset[physical_pin];
+        if (physical_tile->pinloc[pin_width_offset][pin_height_offset][side_cand][physical_pin]) {
+            pin_sides.push_back(side_cand);
+        }
+    }
+
+    return pin_sides;
+}
+
+static bool disablePinBBCost = getenv("DISABLE_PIN_COST");
+
+// janders -- tweak an x,y position based on which side of the LB a pin is on
+static void find_bump(t_physical_tile_type_ptr physical_tile, const int& physical_pin, int* x_bump, int* y_bump) {
+    *x_bump = 0;
+    *y_bump = 0;
+
+    if (disablePinBBCost)
+        return;
+
+    std::vector<e_side> sides = find_physical_tile_pin_side(physical_tile, physical_pin);
+    if (sides.size() == 1) {
+        if (sides[0] == RIGHT)
+            *x_bump = 1;
+        if (sides[0] == TOP)
+            *y_bump = 1;
+    }
+}
+
+// janders -- compute a penalty cost function for a net based on pin alignment
+static int find_pin_side_penalty(ClusterNetId net_id);
+
 /*****************************************************************************/
 void try_place(const Netlist<>& net_list,
                const t_placer_opts& placer_opts,
@@ -569,6 +612,13 @@ void try_place(const Netlist<>& net_list,
      * receive is_flat as false. For example, if the RR graph of router lookahead is built here, it should be as
      * if is_flat is false, even if is_flat is set to true from the command line.
      */
+
+    if (disablePinBBCost) {
+        std::cout << "---------------------> Running without custom BB changes" << std::endl;
+    } else {
+        std::cout << "---------------------> Running with custom BB changes" << std::endl;
+    }
+
     VTR_ASSERT(!is_flat);
     auto& device_ctx = g_vpr_ctx.device();
     auto& atom_ctx = g_vpr_ctx.atom();
@@ -1032,6 +1082,16 @@ void try_place(const Netlist<>& net_list,
                                  blocks_affected, timing_info.get(),
                                  placer_opts.place_algorithm, move_type_stat,
                                  timing_bb_factor);
+
+            // janders
+            long totalPen = 0;
+            for (auto net_id : cluster_ctx.clb_nlist.nets()) {
+                if (!cluster_ctx.clb_nlist.net_is_ignored(net_id)) {
+                    totalPen += find_pin_side_penalty(net_id);
+                }
+            }
+
+            printf("TOTAL PEN: %ld\n", totalPen);
 
             //move the update used move_generator to its original variable
             update_move_generator(move_generator, move_generator2, agent_state,
@@ -2140,15 +2200,21 @@ static void update_net_bb(const ClusterNetId net,
         int pin_width_offset = blk_type->pin_width_offset[iblk_pin];
         int pin_height_offset = blk_type->pin_height_offset[iblk_pin];
 
+        // janders
+        int x_bump;
+        int y_bump;
+        find_bump(blk_type, iblk_pin, &x_bump, &y_bump);
+
         //Incremental bounding box update
-        t_physical_tile_loc pin_old_loc(
-            blocks_affected.moved_blocks[iblk].old_loc.x + pin_width_offset,
-            blocks_affected.moved_blocks[iblk].old_loc.y + pin_height_offset,
+        t_physical_tile_loc pin_old_loc(blocks_affected.moved_blocks[iblk].old_loc.x + pin_width_offset + x_bump,
+            blocks_affected.moved_blocks[iblk].old_loc.y + pin_height_offset + y_bump,
             blocks_affected.moved_blocks[iblk].old_loc.layer);
+
         t_physical_tile_loc pin_new_loc(
-            blocks_affected.moved_blocks[iblk].new_loc.x + pin_width_offset,
-            blocks_affected.moved_blocks[iblk].new_loc.y + pin_height_offset,
+            blocks_affected.moved_blocks[iblk].new_loc.x + pin_width_offset + x_bump,
+            blocks_affected.moved_blocks[iblk].new_loc.y + pin_height_offset + y_bump,
             blocks_affected.moved_blocks[iblk].new_loc.layer);
+
         update_bb(net,
                   ts_bb_edge_new[net],
                   ts_bb_coord_new[net],
@@ -2301,9 +2367,9 @@ static void update_td_delta_costs(const PlaceDelayModel* delay_model,
  * loop iteration of the placement. At each temperature change, these
  * values are updated so that we can balance the tradeoff between the
  * different placement cost components (timing, wirelength and NoC).
- * Depending on the placement mode the corresponding normalization factors are 
+ * Depending on the placement mode the corresponding normalization factors are
  * updated.
- * 
+ *
  * @param costs Contains the normalization factors which need to be updated
  * @param placer_opts Determines the placement mode
  * @param noc_opts Determines if placement includes the NoC
@@ -2326,7 +2392,7 @@ static void update_placement_cost_normalization_factors(t_placer_costs* costs, c
 /**
  * @brief Compute the total normalized cost for a given placement. This
  * computation will vary depending on the placement modes.
- * 
+ *
  * @param costs The current placement cost components and their normalization
  * factors
  * @param placer_opts Determines the placement mode
@@ -2808,6 +2874,60 @@ static void free_try_swap_structs() {
     vtr::release_memory(place_ctx.compressed_block_grids);
 }
 
+static int find_pin_side_penalty(ClusterNetId net_id) {
+    int pnum, dr_x, x, dr_y, y;
+    int penalty = 0;
+
+    std::vector<e_side> dr_sides;
+    std::vector<e_side> ld_sides;
+
+    auto& cluster_ctx = g_vpr_ctx.clustering();
+    auto& place_ctx = g_vpr_ctx.placement();
+    auto& device_ctx = g_vpr_ctx.device();
+    auto& grid = device_ctx.grid;
+
+    ClusterBlockId bnum = cluster_ctx.clb_nlist.net_driver_block(net_id);
+    pnum = net_pin_to_tile_pin_index(net_id, 0);
+    VTR_ASSERT(pnum >= 0);
+    dr_x = place_ctx.block_locs[bnum].loc.x
+           + physical_tile_type(bnum)->pin_width_offset[pnum];
+    dr_y = place_ctx.block_locs[bnum].loc.y
+           + physical_tile_type(bnum)->pin_height_offset[pnum];
+
+    dr_sides = find_physical_tile_pin_side(physical_tile_type(bnum), pnum);
+
+    for (auto pin_id : cluster_ctx.clb_nlist.net_sinks(net_id)) {
+        bnum = cluster_ctx.clb_nlist.pin_block(pin_id);
+        pnum = tile_pin_index(pin_id);
+        x = place_ctx.block_locs[bnum].loc.x
+            + physical_tile_type(bnum)->pin_width_offset[pnum];
+        y = place_ctx.block_locs[bnum].loc.y
+            + physical_tile_type(bnum)->pin_height_offset[pnum];
+        ld_sides = find_physical_tile_pin_side(physical_tile_type(bnum), pnum);
+
+        //    printf("DR SIDES: %d LD SIDES: %d\n", dr_sides.size(), ld_sides.size());
+        if ((dr_sides.size() == 1) && (ld_sides.size() == 1)) {
+            //      printf("%d %d\n", dr_sides[0], ld_sides[0]);
+            if (x >= dr_x) {
+                if (dr_sides[0] == LEFT && ld_sides[0] == RIGHT)
+                    penalty++;
+            } else { // x < dr_x
+                if (dr_sides[0] == RIGHT && ld_sides[0] == LEFT)
+                    penalty++;
+            }
+            if (y >= dr_y) { // janders need to check which way is "up" in VTR placement grid
+                if (dr_sides[0] == BOTTOM && ld_sides[0] == TOP)
+                    penalty++;
+            } else { // y < dr_y
+                if (dr_sides[0] == TOP && ld_sides[0] == BOTTOM)
+                    penalty++;
+            }
+        }
+    }
+
+    return penalty;
+}
+
 /* This routine finds the bounding box of each net from scratch (i.e.   *
  * from only the block location information).  It updates both the       *
  * coordinate and number of pins on each edge information.  It           *
@@ -2831,6 +2951,15 @@ static void get_bb_from_scratch(ClusterNetId net_id,
         + physical_tile_type(bnum)->pin_width_offset[pnum];
     y = place_ctx.block_locs[bnum].loc.y
         + physical_tile_type(bnum)->pin_height_offset[pnum];
+
+    // janders
+    int x_bump;
+    int y_bump;
+
+    find_bump(physical_tile_type(bnum), pnum, &x_bump, &y_bump);
+
+    x += x_bump;
+    y += y_bump;
 
     x = max(min<int>(x, grid.width() - 2), 1);
     y = max(min<int>(y, grid.height() - 2), 1);
@@ -2863,6 +2992,11 @@ static void get_bb_from_scratch(ClusterNetId net_id,
          * that bounding box.  Hence, this "movement" of IO blocks does not affect *
          * the which channels are included within the bounding box, and it         *
          * simplifies the code a lot.                                              */
+
+        find_bump(physical_tile_type(bnum), pnum, &x_bump, &y_bump);
+
+        x += x_bump;
+        y += y_bump;
 
         x = max(min<int>(x, grid.width() - 2), 1);  //-2 for no perim channels
         y = max(min<int>(y, grid.height() - 2), 1); //-2 for no perim channels
@@ -3176,6 +3310,14 @@ static void get_non_updateable_bb(ClusterNetId net_id,
     y = place_ctx.block_locs[bnum].loc.y
         + physical_tile_type(bnum)->pin_height_offset[pnum];
 
+    int x_bump;
+    int y_bump;
+
+    find_bump(physical_tile_type(bnum), pnum, &x_bump, &y_bump);
+
+    x += x_bump;
+    y += y_bump;
+
     xmin = x;
     ymin = y;
     xmax = x;
@@ -3193,6 +3335,11 @@ static void get_non_updateable_bb(ClusterNetId net_id,
         y = place_ctx.block_locs[bnum].loc.y
             + physical_tile_type(bnum)->pin_height_offset[pnum];
         layer = place_ctx.block_locs[bnum].loc.layer;
+
+        find_bump(physical_tile_type(bnum), pnum, &x_bump, &y_bump);
+
+        x += x_bump;
+        y += y_bump;
 
         if (x < xmin) {
             xmin = x;

@@ -954,6 +954,8 @@ struct ParsePlaceDelayModel {
             conv_value.set_value(PlaceDelayModelType::DELTA);
         else if (str == "delta_override")
             conv_value.set_value(PlaceDelayModelType::DELTA_OVERRIDE);
+        else if (str == "delta_sides")
+            conv_value.set_value(PlaceDelayModelType::DELTA_SIDES);
         else {
             std::stringstream msg;
             msg << "Invalid conversion from '" << str << "' to PlaceDelayModelType (expected one of: " << argparse::join(default_choices(), ", ") << ")";
@@ -970,6 +972,8 @@ struct ParsePlaceDelayModel {
             conv_value.set_value("delta");
         else if (val == PlaceDelayModelType::DELTA_OVERRIDE)
             conv_value.set_value("delta_override");
+        else if (val == PlaceDelayModelType::DELTA_SIDES)
+            conv_value.set_value("delta_sides");
         else {
             std::stringstream msg;
             msg << "Unrecognized PlaceDelayModelType";
@@ -979,7 +983,7 @@ struct ParsePlaceDelayModel {
     }
 
     std::vector<std::string> default_choices() {
-        return {"simple", "delta", "delta_override"};
+        return {"simple", "delta", "delta_override", "delta_sides"};
     }
 };
 
@@ -3084,7 +3088,7 @@ bool verify_args(const t_options& args) {
      * describe the communication within the NoC. We ensure that a noc traffic
      * flows file is provided when the "--noc" option is used. If it is not
      * provided, we throw an error.
-     * 
+     *
      */
     if (args.noc.provenance() == Provenance::SPECIFIED && args.noc_flows_file.provenance() != Provenance::SPECIFIED) {
         VPR_FATAL_ERROR(VPR_ERROR_OTHER,

@@ -122,6 +122,30 @@ class DeltaDelayModel : public PlaceDelayModel {
     bool is_flat_;
 };
 
+class DeltaDelaySidesModel : public PlaceDelayModel {
+public:
+    DeltaDelaySidesModel(bool is_flat)
+        : is_flat_(is_flat) {}
+    DeltaDelaySidesModel(vtr::NdMatrix<float, 5> delta_delays, bool is_flat)
+        : delays_(std::move(delta_delays))
+        , is_flat_(is_flat) {}
+
+    void compute(RouterDelayProfiler& router, const t_placer_opts& placer_opts, const t_router_opts& router_opts,
+                 int longest_length) override;
+    float delay(const t_physical_tile_loc& from_loc, int from_pin, const t_physical_tile_loc& to_loc, int to_pin) const override;
+    void dump_echo(std::string filepath) const override;
+
+    void read(const std::string& file) override;
+    void write(const std::string& file) const override;
+    const vtr::NdMatrix<float, 5>& delays() const {
+        return delays_;
+    }
+
+private:
+    vtr::NdMatrix<float, 5> delays_; // [0..num_layers-1][0..max_dx][0..3][0..max_dy][0..3]
+    bool is_flat_;
+};
+
 class OverrideDelayModel : public PlaceDelayModel {
   public:
     OverrideDelayModel(float min_cross_layer_delay,

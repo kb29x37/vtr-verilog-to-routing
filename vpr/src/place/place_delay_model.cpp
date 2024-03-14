@@ -346,6 +346,20 @@ std::unique_ptr<PlaceDelayModel> alloc_lookups_and_delay_model(const Netlist<>& 
                                      is_flat);
 }
 
+static std::vector<e_side> get_pin_side(t_physical_tile_type_ptr physical_tile,
+                                        const int& physical_pin) {
+    std::vector<e_side> pin_sides;
+    for (const e_side& side_cand : {TOP, RIGHT, BOTTOM, LEFT}) {
+        int pin_width_offset = physical_tile->pin_width_offset[physical_pin];
+        int pin_height_offset = physical_tile->pin_height_offset[physical_pin];
+        if (physical_tile->pinloc[pin_width_offset][pin_height_offset][side_cand][physical_pin]) {
+            pin_sides.push_back(side_cand);
+        }
+    }
+
+    return pin_sides;
+}
+
 /**
  * @brief Returns the delay of one point to point connection.
  *
@@ -375,17 +389,59 @@ float comp_td_single_connection_delay(const PlaceDelayModel* delay_model, Cluste
         int sink_y = place_ctx.block_locs[sink_block].loc.y;
         int sink_layer = place_ctx.block_locs[sink_block].loc.layer;
 
-        /**
-         * This heuristic only considers delta_x and delta_y, a much better
-         * heuristic would be to to create a more comprehensive lookup table.
-         *
-         * In particular this approach does not accurately capture the effect
-         * of fast carry-chain connections.
-         */
-        delay_source_to_sink = delay_model->delay({source_x, source_y, source_layer},
-                                                  source_block_ipin,
-                                                  {sink_x, sink_y, sink_layer},
-                                                  sink_block_ipin);
+        if (dynamic_cast<const DeltaDelaySidesModel*>(delay_model) != NULL) {
+            /**
+             * Account for the pin side placement for architectures with restrictive or without crossbars
+             */
+            int source_phys_pin = tile_pin_index(source_pin);
+            int sink_phys_pin = tile_pin_index(sink_pin);
+
+            t_physical_tile_type_ptr src_type = physical_tile_type(source_block);
+            t_physical_tile_type_ptr sink_type = physical_tile_type(sink_block);
+
+            std::vector<e_side> src_sides =  get_pin_side(src_type, source_phys_pin);
+            std::vector<e_side> sink_sides = get_pin_side(sink_type, sink_phys_pin);
+
+            // std::cout << "\n\n\n\n";
+            // std::cout << "src: " << cluster_ctx.clb_nlist.block_name(source_block) << "\n";
+            // std::cout << "sink: " << cluster_ctx.clb_nlist.block_name(sink_block) << "\n";
+            // std::cout << "net: " << cluster_ctx.clb_nlist.net_name(net_id) << "\n";
+            // std::cout << "from:" <<  src_type->name << "\n";
+            // std::cout << "to:" << sink_type->name << "\n";
+
+            delay_source_to_sink = -1;
+
+            for (e_side src_side : src_sides) {
+                for(e_side sink_side : sink_sides) {
+                    float del = delay_model->delay({source_x, source_y, source_layer},
+                                                   src_side,
+                                                   {sink_x, sink_y, sink_layer},
+                                                   sink_side);
+
+                    // std::cout << SIDE_STRING[src_side] << " -> " << SIDE_STRING[sink_side] << ": " << del << "\n";
+
+                    if ((delay_source_to_sink < 0) || (del < delay_source_to_sink)) {
+                        delay_source_to_sink = del;
+                    }
+                }
+            }
+
+            // std::cout << "kept delay:" << delay_source_to_sink << "\n";
+        } else {
+            /**
+             * This heuristic only considers delta_x and delta_y, a much better
+             * heuristic would be to to create a more comprehensive lookup table.
+             *
+             * In particular this approach does not accurately capture the effect
+             * of fast carry-chain connections.
+             */
+
+            delay_source_to_sink = delay_model->delay({source_x, source_y, source_layer},
+                                                      source_block_ipin,
+                                                      {sink_x, sink_y, sink_layer},
+                                                      sink_block_ipin);
+        }
+
         if (delay_source_to_sink < 0) {
             VPR_ERROR(VPR_ERROR_PLACE,
                       "in comp_td_single_connection_delay: Bad delay_source_to_sink value %g from %s (at %d,%d) to %s (at %d,%d)\n"
@@ -412,4 +468,101 @@ void comp_td_connection_delays(const PlaceDelayModel* delay_model) {
             connection_delay[net_id][ipin] = comp_td_single_connection_delay(delay_model, net_id, ipin);
         }
     }
+}
+
+///@brief DeltaDelayModel methods.
+float DeltaDelaySidesModel::delay(const t_physical_tile_loc& from_loc, int from_pin_side,
+                                  const t_physical_tile_loc& to_loc, int to_pin_side) const {
+    int from_x = from_loc.x;
+    int from_y = from_loc.y;
+
+    int to_x = to_loc.x;
+    int to_y = to_loc.y;
+
+    int delta_x = std::abs(from_x - to_x);
+    int delta_y = std::abs(from_y - to_y);
+
+    return delays_[to_loc.layer_num][delta_x][from_pin_side][delta_y][to_pin_side];
+}
+
+// TODO fixme and print sides properly
+void DeltaDelaySidesModel::dump_echo(std::string filepath) const {
+    FILE* f = vtr::fopen(filepath.c_str(), "w");
+    fprintf(f, "         ");
+    for (size_t layer_num = 0; layer_num < delays_.dim_size(0); ++layer_num) {
+        fprintf(f, " %9zu", layer_num);
+        fprintf(f, "\n");
+        for (size_t dx = 0; dx < delays_.dim_size(1); ++dx) {
+            fprintf(f, " %9zu", dx);
+        }
+        fprintf(f, "\n");
+        for (size_t dy = 0; dy < delays_.dim_size(2); ++dy) {
+            fprintf(f, "%9zu", dy);
+            for (size_t dx = 0; dx < delays_.dim_size(1); ++dx) {
+                fprintf(f, " %9.2e", delays_[layer_num][dx][0][dy][0]);
+            }
+            fprintf(f, "\n");
+        }
+    }
+    vtr::fclose(f);
+}
+
+// TODO Keep VprDeltaDelayModel for now...
+void DeltaDelaySidesModel::read(const std::string& file) {
+    // MmapFile object creates an mmap of the specified path, and will munmap
+    // when the object leaves scope.
+    MmapFile f(file);
+
+    /* Increase reader limit to 1G words to allow for large files. */
+    ::capnp::ReaderOptions opts = default_large_capnp_opts();
+
+    // FlatArrayMessageReader is used to read the message from the data array
+    // provided by MmapFile.
+    ::capnp::FlatArrayMessageReader reader(f.getData(), opts);
+
+    // When reading capnproto files the Reader object to use is named
+    // <schema name>::Reader.
+    //
+    // Initially this object is an empty VprDeltaDelayModel.
+    VprDeltaDelayModel::Reader model;
+
+    // The reader.getRoot performs a cast from the generic capnproto to fit
+    // with the specified schema.
+    //
+    // Note that capnproto does not validate that the incoming data matches the
+    // schema.  If this property is required, some form of check would be
+    // required.
+    model = reader.getRoot<VprDeltaDelayModel>();
+
+    // ToNdMatrix is a generic function for converting a Matrix capnproto
+    // to a vtr::NdMatrix.
+    //
+    // The use must supply the matrix dimension (2 in this case), the source
+    // capnproto type (VprFloatEntry),
+    // target C++ type (flat), and a function to convert from the source capnproto
+    // type to the target C++ type (ToFloat).
+    //
+    // The second argument should be of type Matrix<X>::Reader where X is the
+    // capnproto element type.
+    ToNdMatrix<5, VprFloatEntry, float>(&delays_, model.getDelays(), ToFloat);
+}
+
+// TODO Keep VprDeltaDelayModel for now...
+void DeltaDelaySidesModel::write(const std::string& file) const {
+    // MallocMessageBuilder object is the generate capnproto message builder,
+    // using malloc for buffer allocation.
+    ::capnp::MallocMessageBuilder builder;
+
+    // initRoot<X> returns a X::Builder object that can be used to set the
+    // fields in the message.
+    auto model = builder.initRoot<VprDeltaDelayModel>();
+
+    // FromNdMatrix is a generic function for converting a vtr::NdMatrix to a
+    // Matrix message.  It is the mirror function of ToNdMatrix described in
+    // read above.
+    auto delay_values = model.getDelays();
+    FromNdMatrix<5, VprFloatEntry, float>(&delay_values, delays_, FromFloat);
+
+    // writeMessageToFile writes message to the specified file.
+    writeMessageToFile(file, &builder);
 }

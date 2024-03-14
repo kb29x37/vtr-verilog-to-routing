@@ -1133,6 +1133,7 @@ enum class PlaceDelayModelType {
     SIMPLE,
     DELTA,          ///<Delta x/y based delay model
     DELTA_OVERRIDE, ///<Delta x/y based delay model with special case delay overrides
+    DELTA_SIDES    ///<Delta x/y based delay model with pin sides
 };
 
 enum class e_reducer {
@@ -1169,7 +1170,7 @@ enum class e_place_delta_delay_algorithm {
  *   @param place_cost_exp
  *              Wiring cost is divided by the average channel width over
  *              a net's bounding box taken to this exponent.
- *              Only impacts devices with different channel widths in 
+ *              Only impacts devices with different channel widths in
  *              different directions or regions. (Default: 1)
  *   @param place_chan_width
  *              The channel width assumed if only one placement is performed.

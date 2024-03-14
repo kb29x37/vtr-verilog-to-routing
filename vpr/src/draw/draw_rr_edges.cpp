@@ -456,8 +456,9 @@ void draw_pin_to_chan_edge(RRNodeId pin_node, RRNodeId chan_node, ezgl::renderer
      */
     std::vector<e_side> pin_candidate_sides;
     for (const e_side& pin_candidate_side : SIDES) {
-        if ((rr_graph.is_node_on_specific_side(pin_node, pin_candidate_side))
-            && (grid_type->pinloc[width_offset][height_offset][pin_candidate_side][rr_graph.node_pin_num(pin_node)])) {
+        // Inconpatible with unified RRG view
+        // && (grid_type->pinloc[width_offset][height_offset][pin_candidate_side][rr_graph.node_pin_num(pin_node)])
+        if ((rr_graph.is_node_on_specific_side(pin_node, pin_candidate_side))) {
             pin_candidate_sides.push_back(pin_candidate_side);
         }
     }
